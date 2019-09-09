@@ -1,0 +1,207 @@
+%% Stochastic MPC of Trans-esterification Process. VErsion with heating and cooling flowrates
+%  1. Add Uncertainty
+%  2. Apply Dual Control law 
+%  3. Formulate OCP with Probabilistic Constraints
+%  4. Implement Shrinking horizon window
+%% Model parameters
+global a b rho_r V C_w UA Delta_H V_w C_r MW_r u C Ts Q R options m_j T_c T_h 
+global zkhat uk_old p q ek_f setpoint  K we wu ek_x FGain A B Phi_e pkhat;
+% clear all
+% clc
+%%
+u_N=2
+a(1)=3.92E7;
+a(2)=5.77E5;
+a(3)=5.88E12;
+a(4)=0.98E10;
+a(5)=5.35E3;
+a(6)=2.15E4;
+b(1)=6614.83;   
+b(2)=4997.98;
+b(3)=9993.96;
+b(4)=7366.64;
+b(5)=3231.18;
+b(6)=4824.87;
+rho_r= 860; % Kg per metre cube
+V= 1;         % metre cube
+Delta_H= -18500; % KJ/Kmol
+UA=450/60; % KJ per minute per Kelvin
+T_h= 300; % K
+T_c= 260;
+% m_j=99.69;
+m_j=0.1;
+C_w= 4.12 ; %KJ per Kg per Kelvin
+C_r = 1277; %KJ per KM per Kelvin
+MW_r= 391.40; % KG per Kmol
+V_w= 0.5; % metre cube
+%% SMPC tuning Parametrs
+Q=0.001*eye(16,16); Q(7,7)=0.005; Q(8,8)=0.005;
+R=0.001*eye(16,16);
+for l=9:16
+    Q(l,l)=0;
+    R(l,l)=0;
+end
+C=eye(16,16);
+we=1000*diag([1 1 1 1 1 1 100 100 0 0 0 0 0 0 0 0]);
+%0.001*eye(size(Q));
+% wu=1*[1 0 0; 0 1 0; 0 0 1 ];
+wu=1*eye(u_N,u_N);
+wlqr=10*diag([0 0 0 0 0 0 1 1 0 0 0 0 0 0 0 0]);
+wlqr=10*diag([1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1]);
+ulqr=0.1*[1 0 ; 0 1];
+Tf=13*60;
+Ts=30;
+tspan=0:Ts:Tf;
+N=length(tspan);
+itr=N
+%% initial conditions for start of  [state;input;estimates;covariances] 
+y0=zeros(16,1);
+y0(1)=1;
+y0(5)=2;
+y0(7)=280;
+y0(8)=280;
+y0(9:16,:)=TRES_ALG24(y0(1:8));
+u=zeros(1,u_N);
+[t,y]=ode15s(@(t,x)TRES24(t,x,u),tspan,y0,options);
+zkhat = y0;
+pkhat = 1E3*diag(ones(16,1));
+%%
+
+
+% we=100000*diag([0 0 0 0 0 0 1 1 0 0 0 0 0 0 0 0]);
+%0.001*eye(size(Q));
+% wu=1*[1 0 0; 0 1 0; 0 0 1 ];
+% wu=0.1*[1 0 ; 0 1];
+
+%% Simulation Initiations
+oldopts=optimset;
+options1=optimset(oldopts,'display',"on");
+uk_old=u;
+ek_f=zeros(16,1);
+% setpoint=[0.0391 ;0.0232 ;0.0050 ;0.7993 ;1.1363 ;0.2553 ;318.0529 ;244.2912;  317.5100   ; 0.0058   ; 0.0001   ; 0.0364   ; 0.0864; 0.1327 ;0.8555 ;0.2071 ;0.0055];
+setpoint=y(end,:)';
+setpoint(7)=290;
+setpoint(8)=290;
+% setpoint=repmat(setpoint,1,itr+1);
+X_true=zeros(16,itr+1);
+Y_true=zeros(16,itr+1);
+X_true(:,1)=y0;
+Y_true(:,1)=C*X_true(:,1);
+Phi_e=0.9*eye(16,16);
+
+p=5;
+q=3;
+Uk=uk_old;
+X_hat=zkhat;
+for i=1:itr
+    i
+%     if i>= (round(N./2))
+%         setpoint(7)=280;
+%     end
+    S_Noise = normrnd(zeros(16,1),sqrt(diag(Q)));
+    M_Noise = normrnd(zeros(16,1),sqrt(diag(R)));
+    X_true(:,i + 1)=forecast24(X_true(:,i),i,uk_old) + S_Noise;
+    Y_true(:,i+1)=C*X_true(:,i+1) + M_Noise;
+    Y_meas = Y_true(:,i+1);
+    [zkhat,pkhat,K,L,M] = TRES_ekf(zkhat,C,Q,R,i,pkhat,uk_old',Ts,Y_meas);
+    % solving Probabilistic Constraints
+    A=L;
+    B=M;
+    %[FGain,S,eigenV] = dlqr(A,B,wlqr,ulqr); % from LQGR  feedback control gain
+%     [FGain]=Tres_LQGR24(A,B);
+    ek_x= X_true(:,i+1) - zkhat;
+    y_k=Y_true(:,i+1);
+    ek_f=y_k - C*zkhat;
+    [Ukf,fval,exitflag,output]=fmincon('objfun24',zeros(q,u_N),[],[],[],[],zeros(q,u_N),1000*ones(q,u_N),[],options1);
+    exitflag
+%     State_Uncty = (A + B*FGain)*ek_x; %x_Uncty(i + 1)
+%     Incerment(i,:) = (FGain*State_Uncty)';
+    uk_old = Ukf(1,:);% - (FGain*State_Uncty)' ; % 
+    Uk=[Uk;uk_old];
+     
+    
+    
+    X_hat=[X_hat,zkhat];
+
+end
+%% Plots
+for i=1:16
+    figure
+   plot(0:1:itr,X_true(i,:),'-b',0:1:itr,X_hat(i,:),'-r',0:1:itr,setpoint(i)*ones(itr+1),'-g')
+end
+    
+%% Secondary functions
+ 
+ function [X_hat,P_hat,K1,A1,B1]=TRES_ekf(X_hat,C,Q,R,n,P_hat,u,Ts,Y_meas)
+    %State estimation using Extended Kalman Filter
+    %propagation of X estimate 
+    [A1,B1]= TRES_AugJAC23(X_hat(1:8),X_hat(9:16),u,Ts);
+%     a=size(B)
+    [X_pre] = forecast24(X_hat,n,u);
+%     size(A*P_hat*(A'))
+%     size(B*Q*B')
+    P_pre = A1*P_hat*(A1') + Q;
+%     P_pre = A*P_hat*(A') + B*Q*B';
+    %kalman gain for kth step 
+    K1=P_pre*(transpose(C))*(pinv(C*P_pre*transpose(C) + R));
+    %update step
+    X_hat= X_pre + K1*(Y_meas - C*(X_pre));  %% Corrected X estimate
+    X_hat=[X_hat(1:8);TRES_ALG24(X_hat(1:8))]; %% retaining differential states estimates
+    P_hat=(eye(16,16) - K1*C)*P_pre;%*(transpose(eye(16,16)- K_aug*C)) + K_aug*R*transpose(K_aug) ;
+ end
+
+ function dxdt = TRES24(t,x,u)
+ % Dynamic non-linear DAE function of Trans esterification reaction.
+global a b rho_r V C_w UA Delta_H T_h T_c C_r MW_r m_j
+dxdt=zeros(16,1);
+
+dxdt(1)=(-x(11)*x(1)*x(5))+(x(12)*x(2)*x(4));
+dxdt(2)=(x(11)*x(1)*x(5))-(x(12)*x(2)*x(4))-(x(13)*x(2)*x(5))+(x(14)*x(3)*x(4));
+dxdt(3)=(x(13)*x(2)*x(5))-(x(14)*x(3)*x(4))-(x(15)*x(3)*x(5))+(x(16)*x(6)*x(4));
+dxdt(4)=((x(11)*x(1)*x(5))-(x(12)*x(2)*x(4))+(x(13)*x(2)*x(5))-(x(14)*x(3)*x(4))+(x(15)*x(3)*x(5))-(x(16)*x(6)*x(4)));
+dxdt(5)=-((x(11)*x(1)*x(5))-(x(12)*x(2)*x(4))+(x(13)*x(2)*x(5))-(x(14)*x(3)*x(4))+(x(15)*x(3)*x(5))-(x(16)*x(6)*x(4)));
+dxdt(6)=(x(15)*x(3)*x(5))-(x(16)*x(6)*x(4));
+dxdt(7)= (MW_r/(rho_r*V*C_r))*(x(10)*V*Delta_H - x(9)+u(2)); % Tr
+dxdt(8)= (1/m_j)*(u(1)*T_c +  -(u(1))*x(8) + (x(9)/(C_w))); % Tc u(2) is Tsp
+% dxdt(8)= (1/m_j)*(u(1)*T_c -(u(1))*x(8) + (x(9)/(C_w)));
+dxdt(9)= -x(9)+ UA*(x(7)- x(8)); % Qj
+dxdt(10) = -x(10) + ((x(11)*x(1)*x(5))-(x(12)*x(2)*x(4))+(x(13)*x(2)*x(5))-(x(14)*x(3)*x(4))+(x(15)*x(3)*x(5))-(x(16)*x(6)*x(4))); % rate of reaction
+dxdt(11) = -x(11) + a(1)*exp(-b(1)/x(7));
+dxdt(12) =-x(12) + a(2)*exp(-b(2)/x(7));
+dxdt(13) = -x(13) +a(3)*exp(-b(3)/x(7));
+dxdt(14) = -x(14) + a(4)*exp(-b(4)/x(7));
+dxdt(15)= -x(15) + a(5)*exp(-b(5)/x(7));
+dxdt(16) =-x(16) + a(6)*exp(-b(6)/x(7));
+end
+ 
+ function [X_f] = forecast24(X_f,k,u)
+ % forecast from non linear dynamic model
+global Ts options
+      [t,X_f]= ode15s(@(t,x) TRES24(t,x,u) ,[(k-1)*Ts k*Ts] ,X_f,options);
+      X_f=X_f(end,:)';
+ end
+
+ function alg = TRES_ALG24(x)
+ % Algebraic states computation from Differential states using DAE model
+global a b UA 
+x=[x;zeros(8,1)];
+x(9) = UA*(x(7)- x(8));
+x(11) = a(1)*exp(-b(1)/x(7));
+x(12) = a(2)*exp(-b(2)/x(7));
+x(13) = a(3)*exp(-b(3)/x(7));
+x(14) = a(4)*exp(-b(4)/x(7));
+x(15) = a(5)*exp(-b(5)/x(7));
+x(16) = a(6)*exp(-b(6)/x(7));
+x(10) = ((x(11)*x(1)*x(5))-(x(12)*x(2)*x(4))+(x(13)*x(2)*x(5))-(x(14)*x(3)*x(4))+(x(15)*x(3)*x(5))-(x(16)*x(6)*x(4)));
+alg=x(9:16,:);
+ end
+
+function [K]=Tres_LQGR24(A,B)
+Ru=eye(1,1);
+Qx=100*eye(16,16);
+P=100*eye(16,16); %P=QN
+for i=1:40
+P = Qx + A'*P*A - A'*P*B*(inv(Ru + B'*P*B))*B'*P*A;
+end
+K= (inv(Ru + B'*P*B))*B'*P*A;
+end
